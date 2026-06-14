@@ -1,790 +1,282 @@
 /* eslint-disable react/prop-types */
 import { useEffect, useRef, useState, useImperativeHandle, forwardRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
+import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.js?url';
 import { fabric } from 'fabric';
-import { 
-  Undo2, Redo2, ZoomIn, ZoomOut, Maximize, 
-  Trash2, ChevronLeft, ChevronRight, FileImage 
-} from 'lucide-react';
+import { Undo2, ZoomIn, ZoomOut, Maximize, Trash2, ChevronLeft, ChevronRight, FileImage, Download } from 'lucide-react';
 import toast from 'react-hot-toast';
 
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+
 const PDFViewer = forwardRef(({
-  pdfFile,
-  currentPage,
-  setCurrentPage,
-  totalPages,
-  setTotalPages,
-  setPdfDoc,
-  setPageDimensions,
-  activeTool,
-  setActiveTool,
-  color,
-  strokeWidth,
-  annotationsMap,
-  setAnnotationsMap,
-  setCanvasInstance,
-  gfMode,
-  reduceMotion,
-  onUpdateLayers
+  pdfFile, currentPage, setCurrentPage, totalPages, setTotalPages, setPdfDoc, setPageDimensions, 
+  activeTool, setActiveTool, color, strokeWidth, annotationsMap, setAnnotationsMap, 
+  setCanvasInstance, onUpdateLayers, textColor, textFont, onExportPDF
 }, ref) => {
   const containerRef = useRef(null);
-  const [loading, setLoading] = useState(false);
+  const fabricInstance = useRef(null);
   const [pdfDocument, setPdfDocument] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [zoom, setZoom] = useState(1.0);
   const [thumbnails, setThumbnails] = useState([]);
-  const [fade, setFade] = useState(false);
-  const fabricInstance = useRef(null);
-
-  // Per-page Undo/Redo stacks
   const historyStacks = useRef({});
   const historyPointers = useRef({});
+  const isSpacePressed = useRef(false);
+  const prevToolBeforeSpace = useRef(null);
 
-  // Active parameters
-  const toolParamsRef = useRef({ activeTool, color, strokeWidth });
-  useEffect(() => {
-    toolParamsRef.current = { activeTool, color, strokeWidth };
-  }, [activeTool, color, strokeWidth]);
+  const toolParams = useRef({ activeTool, color, strokeWidth, textColor, textFont });
+  useEffect(() => { toolParams.current = { activeTool, color, strokeWidth, textColor, textFont }; }, [activeTool, color, strokeWidth, textColor, textFont]);
 
-  // 1. Load document
-  useEffect(() => {
-    if (!pdfFile) return;
-    const loadPdf = async () => {
-      try {
-        setLoading(true);
-        const arrayBuffer = await pdfFile.arrayBuffer();
-        const doc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-        setPdfDocument(doc);
-        setPdfDoc(doc);
-        setTotalPages(doc.numPages);
-        setCurrentPage(1);
-        setZoom(1.0);
-        historyStacks.current = {};
-        historyPointers.current = {};
-        generateThumbnails(doc);
-      } catch (err) {
-        console.error(err);
-        toast.error('Error opening PDF document');
-      } finally {
-        setLoading(false);
-      }
-    };
-    loadPdf();
-  }, [pdfFile]);
-
-  // Generate page thumbnail previews
-  const generateThumbnails = async (doc) => {
-    try {
-      const list = [];
-      for (let i = 1; i <= Math.min(doc.numPages, 100); i++) {
-        const page = await doc.getPage(i);
-        const viewport = page.getViewport({ scale: 0.12 });
-        const canvas = document.createElement('canvas');
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
-        const ctx = canvas.getContext('2d');
-        await page.render({ canvasContext: ctx, viewport }).promise;
-        list.push({ pageNum: i, dataUrl: canvas.toDataURL() });
-      }
-      setThumbnails(list);
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  // Expose utilities to parent via React Ref
-  useImperativeHandle(ref, () => ({
-    getCanvas: () => fabricInstance.current,
-    
-    insertImage: (file) => {
-      const canvas = fabricInstance.current;
-      if (!canvas) return;
-      const reader = new FileReader();
-      reader.onload = (f) => {
-        fabric.Image.fromURL(f.target.result, (img) => {
-          img.set({
-            left: 50,
-            top: 50,
-            selectable: true,
-            hasBorders: true,
-            hasControls: true
-          });
-          img.scaleToWidth(200);
-          canvas.add(img);
-          canvas.setActiveObject(img);
-          canvas.renderAll();
-          saveHistorySnapshot();
-        });
-      };
-      reader.readAsDataURL(file);
-      toast.success("Image placed on canvas");
-    },
-
-    insertSignature: (dataUrl) => {
-      const canvas = fabricInstance.current;
-      if (!canvas) return;
-      fabric.Image.fromURL(dataUrl, (img) => {
-        img.set({
-          left: 100,
-          top: 100,
-          selectable: true,
-          hasBorders: true,
-          hasControls: true
-        });
-        img.scaleToWidth(150);
-        canvas.add(img);
-        canvas.setActiveObject(img);
-        canvas.renderAll();
-        saveHistorySnapshot();
-        toast.success("Signature stamped onto page!");
-      });
-    },
-
-    removeImageBackground: () => {
-      const canvas = fabricInstance.current;
-      if (!canvas) return;
-      const activeObj = canvas.getActiveObject();
-      if (!activeObj || activeObj.type !== 'image') {
-        toast.error("Please select an image layer first");
-        return;
-      }
-      const imgElement = activeObj._element;
-      const canvasTemp = document.createElement('canvas');
-      canvasTemp.width = imgElement.width;
-      canvasTemp.height = imgElement.height;
-      const ctx = canvasTemp.getContext('2d');
-      ctx.drawImage(imgElement, 0, 0);
-      const imgData = ctx.getImageData(0, 0, canvasTemp.width, canvasTemp.height);
-      const data = imgData.data;
-
-      // Filter near-white background pixels
-      for (let i = 0; i < data.length; i += 4) {
-        const r = data[i];
-        const g = data[i+1];
-        const b = data[i+2];
-        if (r > 215 && g > 215 && b > 215) {
-          data[i+3] = 0;
-        }
-      }
-      ctx.putImageData(imgData, 0, 0);
-      activeObj.setSrc(canvasTemp.toDataURL(), () => {
-        canvas.renderAll();
-        saveHistorySnapshot();
-        toast.success("Image background removed");
-      });
-    },
-
-    rotateSelectedImage: () => {
-      const canvas = fabricInstance.current;
-      if (!canvas) return;
-      const activeObj = canvas.getActiveObject();
-      if (!activeObj) {
-        toast.error("Please select an object to rotate");
-        return;
-      }
-      const currentAngle = activeObj.get('angle') || 0;
-      activeObj.set('angle', (currentAngle + 90) % 360);
-      activeObj.setCoords();
-      canvas.renderAll();
-      saveHistorySnapshot();
-      toast.success("Object rotated 90°");
-    }
-  }));
-
-  // Handle Undo-Redo Snapshots
-  const saveHistorySnapshot = () => {
-    const canvas = fabricInstance.current;
-    if (!canvas) return;
-
-    const objects = canvas.getObjects().map(obj => obj.toObject());
-    
-    if (!historyStacks.current[currentPage]) {
-      historyStacks.current[currentPage] = [];
-      historyPointers.current[currentPage] = -1;
-    }
-
-    const stack = historyStacks.current[currentPage];
-    const pointer = historyPointers.current[currentPage];
-
-    const trimmedStack = stack.slice(0, pointer + 1);
-    trimmedStack.push(objects);
-    
-    historyStacks.current[currentPage] = trimmedStack;
-    historyPointers.current[currentPage] = trimmedStack.length - 1;
-
-    setAnnotationsMap(prev => ({
-      ...prev,
-      [currentPage]: objects
-    }));
-
-    updateLayersState();
-  };
-
-  const handleUndo = () => {
-    const pointer = historyPointers.current[currentPage];
-    const stack = historyStacks.current[currentPage];
-    if (pointer !== undefined && pointer > 0) {
-      historyPointers.current[currentPage] = pointer - 1;
-      restoreFromState(stack[pointer - 1]);
-      toast.success("Undo performed");
-    } else {
-      toast.error("Nothing to undo");
-    }
-  };
-
-  const handleRedo = () => {
-    const pointer = historyPointers.current[currentPage];
-    const stack = historyStacks.current[currentPage];
-    if (pointer !== undefined && stack && pointer < stack.length - 1) {
-      historyPointers.current[currentPage] = pointer + 1;
-      restoreFromState(stack[pointer + 1]);
-      toast.success("Redo performed");
-    } else {
-      toast.error("Nothing to redo");
-    }
-  };
-
-  const restoreFromState = (state) => {
-    const canvas = fabricInstance.current;
-    if (!canvas) return;
-    canvas.remove(...canvas.getObjects());
-    fabric.util.enlivenObjects(state, (objects) => {
-      objects.forEach(obj => canvas.add(obj));
-      canvas.renderAll();
-      setAnnotationsMap(prev => ({
-        ...prev,
-        [currentPage]: state
-      }));
-      updateLayersState();
-    });
-  };
-
-  // Keyboard deletion support
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA') return;
-        deleteActiveObject();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentPage]);
-
-  const deleteActiveObject = () => {
-    const canvas = fabricInstance.current;
-    if (canvas) {
-      const active = canvas.getActiveObject();
-      if (active) {
-        canvas.remove(active);
-        canvas.discardActiveObject().renderAll();
-        saveHistorySnapshot();
-        toast.success("Deleted active object");
-      }
-    }
-  };
-
-  // Dispatch current elements mapping to Active Layers Sidebar
+  // FUNCTIONS
   const updateLayersState = () => {
     const canvas = fabricInstance.current;
     if (!canvas) return;
-    const items = canvas.getObjects().map((obj, index) => {
-      let title = `Layer ${index + 1}: ${obj.type.toUpperCase()}`;
-      if (obj.type === 'textbox' || obj.type === 'i-text') {
-        title = `Text: "${obj.text.substring(0, 10)}${obj.text.length > 10 ? '...' : ''}"`;
-      } else if (obj.type === 'image') {
-        title = `Image File Layer`;
-      } else if (obj.type === 'rect') {
-        title = `Rectangle Border`;
-      }
-      return {
-        id: obj.id || `layer-${index}-${Date.now()}`,
-        title,
-        ref: obj
-      };
-    });
+    const items = canvas.getObjects().map((obj, index) => ({
+      id: `l-${index}`, title: obj.type.toUpperCase(), ref: obj
+    }));
     onUpdateLayers(items);
   };
 
-  // Render loop (Only runs when switching pages or scaling viewport)
-  useEffect(() => {
-    if (!pdfDocument || !currentPage) return;
-
-    let active = true;
-    setLoading(true);
-    setFade(false);
-
-    const loadPageFrame = async () => {
-      try {
-        const page = await pdfDocument.getPage(currentPage);
-        const viewport = page.getViewport({ scale: 1.5 * zoom });
-
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = viewport.width;
-        tempCanvas.height = viewport.height;
-        const ctx = tempCanvas.getContext('2d');
-        await page.render({ canvasContext: ctx, viewport }).promise;
-
-        if (!active) return;
-
-        const imageUrl = tempCanvas.toDataURL();
-        setPageDimensions({ width: viewport.width, height: viewport.height });
-
-        if (fabricInstance.current) {
-          fabricInstance.current.dispose();
-          fabricInstance.current = null;
-        }
-
-        const container = containerRef.current;
-        if (container) container.innerHTML = '';
-        else return;
-
-        const canvasEl = document.createElement('canvas');
-        container.appendChild(canvasEl);
-
-        const fabricCanvas = new fabric.Canvas(canvasEl, {
-          width: viewport.width,
-          height: viewport.height,
-          preserveObjectStacking: true,
-        });
-
-        fabricInstance.current = fabricCanvas;
-        setCanvasInstance(fabricCanvas);
-
-        fabricCanvas.setBackgroundImage(imageUrl, () => {
-          if (active) {
-            fabricCanvas.renderAll();
-            setFade(true); // Smoothly fade in content
-            updateLayersState();
-          }
-        }, {
-          originX: 'left',
-          originY: 'top',
-          scaleX: 1,
-          scaleY: 1,
-        });
-
-        // Restore serialized objects
-        const pageObjects = annotationsMap[currentPage];
-        if (pageObjects && pageObjects.length > 0) {
-          fabric.util.enlivenObjects(pageObjects, (objects) => {
-            if (!active) return;
-            objects.forEach(obj => fabricCanvas.add(obj));
-            fabricCanvas.renderAll();
-            updateLayersState();
-            
-            // Set history seed state
-            if (!historyStacks.current[currentPage]) {
-              historyStacks.current[currentPage] = [pageObjects];
-              historyPointers.current[currentPage] = 0;
-            }
-          }, 'fabric');
-        } else {
-          // Initialize history stack
-          if (!historyStacks.current[currentPage]) {
-            historyStacks.current[currentPage] = [[]];
-            historyPointers.current[currentPage] = 0;
-          }
-        }
-
-        const onAnnotationUpdate = () => {
-          if (!active) return;
-          saveHistorySnapshot();
-        };
-
-        fabricCanvas.on('object:added', onAnnotationUpdate);
-        fabricCanvas.on('object:removed', onAnnotationUpdate);
-        fabricCanvas.on('object:modified', onAnnotationUpdate);
-
-      } catch (e) {
-        console.error(e);
-      } finally {
-        if (active) setLoading(false);
-      }
-    };
-
-    loadPageFrame();
-
-    return () => {
-      active = false;
-      if (fabricInstance.current) {
-        fabricInstance.current.dispose();
-        fabricInstance.current = null;
-      }
-    };
-  }, [pdfDocument, currentPage, zoom]);
-
-  // Clean listeners and dynamically bind the active tool's handlers
-  useEffect(() => {
+  const saveHistorySnapshot = () => {
     const canvas = fabricInstance.current;
     if (!canvas) return;
+    const objects = canvas.getObjects().map(obj => obj.toObject());
+    if (!historyStacks.current[currentPage]) { historyStacks.current[currentPage] = []; historyPointers.current[currentPage] = -1; }
+    historyStacks.current[currentPage].push(objects);
+    historyPointers.current[currentPage]++;
+    setAnnotationsMap(prev => ({ ...prev, [currentPage]: objects }));
+    updateLayersState();
+  };
 
-    // Remove any previous events to prevent duplicates or interference
-    canvas.off('mouse:down');
-    canvas.off('mouse:move');
-    canvas.off('mouse:up');
+  const deleteActiveObject = () => {
+    const canvas = fabricInstance.current;
+    if (canvas && canvas.getActiveObject()) {
+      canvas.remove(canvas.getActiveObject());
+      canvas.discardActiveObject().renderAll();
+      saveHistorySnapshot();
+    }
+  };
 
-    canvas.isDrawingMode = false;
-    canvas.selection = false;
-    canvas.defaultCursor = 'default';
+  const handleUndo = () => {
+    const p = historyPointers.current[currentPage];
+    const s = historyStacks.current[currentPage];
+    if (p > 0) {
+      historyPointers.current[currentPage]--;
+      const state = s[historyPointers.current[currentPage]];
+      const canvas = fabricInstance.current;
+      canvas.remove(...canvas.getObjects());
+      fabric.util.enlivenObjects(state, (objs) => { objs.forEach(o => canvas.add(o)); canvas.renderAll(); updateLayersState(); });
+    }
+  };
 
-    // Disable object selection unless "Select" or "Eraser" tool is active
-    canvas.getObjects().forEach(obj => {
-      obj.selectable = (activeTool === 'select');
-      obj.evented = (activeTool === 'select' || activeTool === 'eraser');
-    });
+  const handleResetViewport = () => {
+    setZoom(1.0);
+    if (fabricInstance.current) {
+      fabricInstance.current.setViewportTransform([1, 0, 0, 1, 0, 0]);
+      fabricInstance.current.renderAll();
+      toast.success("Centered");
+    }
+  };
 
-    if (activeTool === 'draw') {
-      canvas.isDrawingMode = true;
-      if (canvas.freeDrawingBrush) {
-        canvas.freeDrawingBrush.color = color;
-        canvas.freeDrawingBrush.width = strokeWidth;
-      }
-    } 
-    else if (activeTool === 'highlight') {
-      canvas.isDrawingMode = true;
-      if (canvas.freeDrawingBrush) {
-        canvas.freeDrawingBrush.color = 'rgba(253, 224, 71, 0.45)'; // Translucent yellow
-        canvas.freeDrawingBrush.width = strokeWidth * 4 + 10;
-      }
-    } 
-    else if (activeTool === 'eraser') {
-      // 1. PDF Background Whiteout (draw white lines over underlying PDF content)
-      canvas.isDrawingMode = true;
-      if (canvas.freeDrawingBrush) {
-        canvas.freeDrawingBrush.color = '#ffffff'; // Paints over PDF background
-        canvas.freeDrawingBrush.width = strokeWidth * 4 + 12;
-      }
+  const setupToolListeners = (canvas) => {
+    canvas.off('mouse:down'); canvas.off('mouse:move'); canvas.off('mouse:up');
+    canvas.isDrawingMode = (activeTool === 'draw' || activeTool === 'highlight' || activeTool === 'eraser');
+    canvas.selection = (activeTool === 'select');
+    canvas.defaultCursor = activeTool === 'pan' ? 'grab' : 'default';
 
-      // 2. Layer Eraser (click to remove shape/text annotations)
+    if (canvas.isDrawingMode && canvas.freeDrawingBrush) {
+      if (activeTool === 'eraser') canvas.freeDrawingBrush.color = '#ffffff';
+      else if (activeTool === 'highlight') canvas.freeDrawingBrush.color = 'rgba(253, 224, 71, 0.45)';
+      else canvas.freeDrawingBrush.color = color;
+      canvas.freeDrawingBrush.width = activeTool === 'highlight' ? strokeWidth * 5 : strokeWidth;
+    }
+
+    if (activeTool === 'pan') {
+      let isPanning = false; let lastX, lastY;
+      canvas.on('mouse:down', (e) => { isPanning = true; lastX = e.e.clientX; lastY = e.e.clientY; canvas.defaultCursor = 'grabbing'; });
+      canvas.on('mouse:move', (e) => {
+        if (!isPanning) return;
+        const vpt = [...canvas.viewportTransform];
+        vpt[4] += e.e.clientX - lastX; vpt[5] += e.e.clientY - lastY;
+        canvas.setViewportTransform(vpt); lastX = e.e.clientX; lastY = e.e.clientY;
+      });
+      canvas.on('mouse:up', () => { isPanning = false; canvas.defaultCursor = 'grab'; });
+    }
+
+    if (activeTool === 'text') {
+      canvas.on('mouse:down', (o) => {
+        if (canvas.getActiveObject()) return;
+        const ptr = canvas.getPointer(o.e);
+        const txt = new fabric.Textbox('Edit Me', { left: ptr.x, top: ptr.y, fontSize: 22, fill: textColor, fontFamily: textFont, width: 150 });
+        canvas.add(txt).setActiveObject(txt);
+        saveHistorySnapshot();
+        setActiveTool('select');
+      });
+    }
+
+    if (activeTool === 'rectangle') {
+      let isDown, origX, origY, rect;
+      canvas.on('mouse:down', (o) => {
+        isDown = true; const ptr = canvas.getPointer(o.e); origX = ptr.x; origY = ptr.y;
+        rect = new fabric.Rect({ left: origX, top: origY, width: 0, height: 0, fill: 'transparent', stroke: color, strokeWidth });
+        canvas.add(rect);
+      });
+      canvas.on('mouse:move', (o) => {
+        if (!isDown) return; const ptr = canvas.getPointer(o.e);
+        rect.set({ left: Math.min(origX, ptr.x), top: Math.min(origY, ptr.y), width: Math.abs(origX - ptr.x), height: Math.abs(origY - ptr.y) });
+        canvas.renderAll();
+      });
+      canvas.on('mouse:up', () => { isDown = false; saveHistorySnapshot(); });
+    }
+
+    if (activeTool === 'eraser') {
       canvas.on('mouse:down', (options) => {
         if (options.target) {
           canvas.remove(options.target);
           canvas.discardActiveObject().renderAll();
           saveHistorySnapshot();
-          toast.success("Erased shape annotation");
         }
-      });
-    } 
-    else if (activeTool === 'select') {
-      canvas.selection = true;
-      canvas.defaultCursor = 'default';
-    } 
-    else if (activeTool === 'rectangle') {
-      canvas.defaultCursor = 'crosshair';
-      let isMouseDown = false;
-      let rect = null;
-      let origX = 0, origY = 0;
-
-      canvas.on('mouse:down', (options) => {
-        if (canvas.getActiveObject()) return; // Don't draw if adjusting a shape
-
-        isMouseDown = true;
-        const pointer = canvas.getPointer(options.e);
-        origX = pointer.x;
-        origY = pointer.y;
-
-        rect = new fabric.Rect({
-          left: origX,
-          top: origY,
-          width: 0,
-          height: 0,
-          fill: 'transparent',
-          stroke: color,
-          strokeWidth: strokeWidth,
-          selectable: true,
-          hasBorders: true,
-          hasControls: true
-        });
-        canvas.add(rect);
-        canvas.setActiveObject(rect);
-        canvas.renderAll();
-      });
-
-      canvas.on('mouse:move', (options) => {
-        if (!isMouseDown || !rect) return;
-        const pointer = canvas.getPointer(options.e);
-
-        const left = Math.min(origX, pointer.x);
-        const top = Math.min(origY, pointer.y);
-        const width = Math.abs(origX - pointer.x);
-        const height = Math.abs(origY - pointer.y);
-
-        rect.set({ left, top, width, height });
-        canvas.renderAll();
-      });
-
-      canvas.on('mouse:up', () => {
-        if (isMouseDown) {
-          isMouseDown = false;
-          rect = null;
-          saveHistorySnapshot();
-        }
-      });
-    } 
-    else if (activeTool === 'arrow') {
-      canvas.defaultCursor = 'crosshair';
-      let isMouseDown = false;
-      let lineObj = null;
-      let arrowHead = null;
-      let origX = 0, origY = 0;
-
-      canvas.on('mouse:down', (options) => {
-        if (canvas.getActiveObject()) return;
-
-        isMouseDown = true;
-        const pointer = canvas.getPointer(options.e);
-        origX = pointer.x;
-        origY = pointer.y;
-
-        lineObj = new fabric.Line([origX, origY, origX, origY], {
-          stroke: color,
-          strokeWidth: strokeWidth,
-          selectable: false,
-          evented: false
-        });
-
-        arrowHead = new fabric.Triangle({
-          left: origX,
-          top: origY,
-          originX: 'center',
-          originY: 'center',
-          angle: 0,
-          width: strokeWidth * 4 + 8,
-          height: strokeWidth * 4 + 8,
-          fill: color,
-          selectable: false,
-          evented: false
-        });
-
-        canvas.add(lineObj, arrowHead);
-        canvas.renderAll();
-      });
-
-      canvas.on('mouse:move', (options) => {
-        if (!isMouseDown || !lineObj || !arrowHead) return;
-        const pointer = canvas.getPointer(options.e);
-
-        lineObj.set({ x2: pointer.x, y2: pointer.y });
-
-        const dx = pointer.x - origX;
-        const dy = pointer.y - origY;
-        const angle = Math.atan2(dy, dx) * (180 / Math.PI) + 90;
-
-        arrowHead.set({
-          left: pointer.x,
-          top: pointer.y,
-          angle: angle
-        });
-
-        canvas.renderAll();
-      });
-
-      canvas.on('mouse:up', () => {
-        if (isMouseDown) {
-          isMouseDown = false;
-          if (lineObj && arrowHead) {
-            canvas.remove(lineObj, arrowHead);
-            const group = new fabric.Group([lineObj, arrowHead], {
-              selectable: true,
-              hasBorders: true,
-              hasControls: true
-            });
-            canvas.add(group);
-            canvas.setActiveObject(group);
-            canvas.renderAll();
-            saveHistorySnapshot();
-          }
-          lineObj = null;
-          arrowHead = null;
-        }
-      });
-    } 
-    else if (activeTool === 'text') {
-      canvas.defaultCursor = 'text';
-
-      canvas.on('mouse:down', (options) => {
-        if (canvas.getActiveObject()) return;
-
-        const pointer = canvas.getPointer(options.e);
-        const textbox = new fabric.Textbox('Double click to edit', {
-          left: pointer.x,
-          top: pointer.y,
-          width: 180,
-          fontSize: 20,
-          fill: color,
-          fontFamily: 'sans-serif',
-          backgroundColor: 'rgba(255, 255, 255, 0.9)',
-          borderColor: color,
-          editingBorderColor: color,
-          cornerColor: color,
-          cornerSize: 8,
-          transparentCorners: false,
-          selectable: true,
-          hasBorders: true,
-          hasControls: true
-        });
-
-        canvas.add(textbox);
-        canvas.setActiveObject(textbox);
-        canvas.renderAll();
-        saveHistorySnapshot();
-
-        // Switch automatically to select tool for immediate typing/manipulation
-        setActiveTool('select');
       });
     }
-
-    canvas.renderAll();
-  }, [activeTool, color, strokeWidth]);
-
-  // PNG Export Current Page
-  const saveAsPNG = () => {
-    const canvas = fabricInstance.current;
-    if (!canvas) return;
-    const url = canvas.toDataURL({ format: 'png', quality: 1.0 });
-    const link = document.createElement('a');
-    link.download = `page_export_${currentPage}.png`;
-    link.href = url;
-    link.click();
-    toast.success("Page exported as PNG image!");
   };
 
+  useEffect(() => {
+    if (!pdfFile) return;
+    (async () => {
+      setLoading(true);
+      const doc = await pdfjsLib.getDocument({ data: await pdfFile.arrayBuffer() }).promise;
+      setPdfDocument(doc); setPdfDoc(doc); setTotalPages(doc.numPages);
+      const list = [];
+      for (let i = 1; i <= Math.min(doc.numPages, 10); i++) {
+        const p = await doc.getPage(i); const vp = p.getViewport({ scale: 0.1 });
+        const c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height;
+        await p.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+        list.push({ pageNum: i, dataUrl: c.toDataURL() });
+      }
+      setThumbnails(list); setLoading(false);
+    })();
+  }, [pdfFile]);
+
+  useEffect(() => {
+    if (!pdfDocument) return;
+    (async () => {
+      setLoading(true);
+      const page = await pdfDocument.getPage(currentPage);
+      const vp = page.getViewport({ scale: 1.5 * zoom });
+      const tempC = document.createElement('canvas'); tempC.width = vp.width; tempC.height = vp.height;
+      await page.render({ canvasContext: tempC.getContext('2d'), viewport: vp }).promise;
+      setPageDimensions({ width: vp.width, height: vp.height });
+
+      if (fabricInstance.current) fabricInstance.current.dispose();
+      const el = document.createElement('canvas');
+      if (containerRef.current) {
+        containerRef.current.innerHTML = ''; containerRef.current.appendChild(el);
+        const fc = new fabric.Canvas(el, { width: vp.width, height: vp.height, preserveObjectStacking: true });
+        fabricInstance.current = fc; setCanvasInstance(fc);
+        fabric.Image.fromURL(tempC.toDataURL(), (img) => {
+          fc.setBackgroundImage(img, fc.renderAll.bind(fc), { originX: 'left', originY: 'top' });
+        });
+        const saved = annotationsMap[currentPage];
+        if (saved) fabric.util.enlivenObjects(saved, (objs) => { objs.forEach(o => fc.add(o)); fc.renderAll(); updateLayersState(); });
+        setupToolListeners(fc);
+      }
+      setLoading(false);
+    })();
+  }, [pdfDocument, currentPage, zoom]);
+
+  useEffect(() => {
+    if (fabricInstance.current) {
+        const activeObj = fabricInstance.current.getActiveObject();
+        if (activeObj) {
+            if (activeObj.type === 'textbox') activeObj.set({ fill: textColor, fontFamily: textFont });
+            else activeObj.set({ stroke: color });
+            fabricInstance.current.renderAll();
+        }
+        setupToolListeners(fabricInstance.current);
+    }
+  }, [activeTool, color, strokeWidth, textColor, textFont]);
+
+  useEffect(() => {
+    const down = (e) => { if (e.key === ' ' && !isSpacePressed.current) { e.preventDefault(); isSpacePressed.current = true; prevToolBeforeSpace.current = activeTool; setActiveTool('pan'); }};
+    const up = (e) => { if (e.key === ' ' && isSpacePressed.current) { isSpacePressed.current = false; setActiveTool(prevToolBeforeSpace.current); }};
+    window.addEventListener('keydown', down); window.addEventListener('keyup', up);
+    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
+  }, [activeTool]);
+
+  useImperativeHandle(ref, () => ({
+    insertImage: (file) => {
+      const reader = new FileReader();
+      reader.onload = (f) => fabric.Image.fromURL(f.target.result, (img) => {
+        img.scaleToWidth(180); fabricInstance.current.add(img).setActiveObject(img).renderAll(); saveHistorySnapshot();
+      });
+      reader.readAsDataURL(file);
+    },
+    insertSignature: (dataUrl) => {
+      fabric.Image.fromURL(dataUrl, (img) => {
+        img.scaleToWidth(150); fabricInstance.current.add(img).setActiveObject(img).renderAll(); saveHistorySnapshot();
+      });
+    },
+    rotateSelectedImage: () => {
+      const obj = fabricInstance.current?.getActiveObject();
+      if (obj) { obj.set('angle', (obj.angle + 90) % 360); obj.setCoords(); fabricInstance.current.renderAll(); saveHistorySnapshot(); }
+    },
+    convertTextToLayers: async () => {
+      if (!pdfDocument) return;
+      setScanning(true);
+      try {
+        const page = await pdfDocument.getPage(currentPage);
+        const text = await page.getTextContent();
+        const vp = page.getViewport({ scale: 1.5 * zoom });
+        await new Promise(r => setTimeout(r, 1500));
+        text.items.forEach(item => {
+          if (!item.str.trim()) return;
+          const [x, y] = vp.convertToViewportPoint(item.transform[4], item.transform[5]);
+          const fs = Math.sqrt(item.transform[0]**2 + item.transform[1]**2) * 1.5 * zoom;
+          const mask = new fabric.Rect({ left: x, top: y - fs, width: item.width * 1.5 * zoom, height: fs * 1.2, fill: 'white', selectable: false, evented: false });
+          const box = new fabric.Textbox(item.str, { left: x, top: y - fs, fontSize: fs, fill: 'black', fontFamily: 'sans-serif', width: item.width * 1.5 * zoom + 20 });
+          fabricInstance.current.add(mask, box);
+        });
+        fabricInstance.current.renderAll(); saveHistorySnapshot();
+      } finally { setScanning(false); }
+    }
+  }));
+
   return (
-    <div className={`flex flex-col gap-4 w-full ${reduceMotion ? '' : 'animate-float-gentle'}`}>
-      {/* Floating control bar */}
-      <div className={`rounded-2xl px-5 py-3 flex flex-wrap justify-between items-center gap-4 transition-all duration-300 ${
-        gfMode ? 'glass-panel-gf text-slate-800' : 'glass-panel text-white'
-      }`}>
-        {/* Navigation buttons */}
-        <div className="flex items-center gap-3">
-          <button 
-            disabled={currentPage <= 1 || loading}
-            onClick={() => setCurrentPage(currentPage - 1)}
-            className={`p-2 rounded-xl disabled:opacity-30 border ${
-              gfMode ? 'glass-button-gf text-rose-500' : 'glass-button'
-            }`}
-          >
-            <ChevronLeft size={18} />
-          </button>
-          <span className="text-sm font-semibold tracking-wider">Page {currentPage} / {totalPages || 1}</span>
-          <button 
-            disabled={currentPage >= totalPages || loading}
-            onClick={() => setCurrentPage(currentPage + 1)}
-            className={`p-2 rounded-xl disabled:opacity-30 border ${
-              gfMode ? 'glass-button-gf text-rose-500' : 'glass-button'
-            }`}
-          >
-            <ChevronRight size={18} />
-          </button>
+    <div className="flex flex-col h-full w-full overflow-hidden">
+      <div className="glass-panel rounded-3xl p-4 flex flex-wrap justify-between items-center gap-4 text-white shadow-2xl shrink-0 mb-4 mx-2">
+        <div className="flex items-center gap-2">
+          <button onClick={() => setCurrentPage(Math.max(1, currentPage - 1))} className="p-2 glass-button rounded-xl"><ChevronLeft size={20}/></button>
+          <span className="text-[10px] font-black uppercase tracking-widest px-2 text-indigo-400 font-mono">Pg {currentPage} / {totalPages}</span>
+          <button onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))} className="p-2 glass-button rounded-xl"><ChevronRight size={20}/></button>
         </div>
-
-        {/* Viewport Scale adjustments */}
-        <div className={`flex items-center gap-2 border-l pl-4 ${gfMode ? 'border-rose-200' : 'border-white/10'}`}>
-          <button 
-            onClick={() => setZoom(z => Math.max(z - 0.1, 0.5))} 
-            className={`p-2 rounded-xl border ${gfMode ? 'glass-button-gf text-rose-500' : 'glass-button'}`}
-          >
-            <ZoomOut size={16} />
-          </button>
-          <span className="text-xs font-semibold w-12 text-center">{Math.round(zoom * 100)}%</span>
-          <button 
-            onClick={() => setZoom(z => Math.min(z + 0.1, 3.0))} 
-            className={`p-2 rounded-xl border ${gfMode ? 'glass-button-gf text-rose-500' : 'glass-button'}`}
-          >
-            <ZoomIn size={16} />
-          </button>
-          <button 
-            onClick={() => setZoom(1.0)} 
-            className={`p-2 rounded-xl border ${gfMode ? 'glass-button-gf text-rose-500' : 'glass-button'}`} 
-            title="Reset Zoom"
-          >
-            <Maximize size={14} />
-          </button>
+        <div className="flex items-center gap-2 border-l border-white/5 pl-4">
+          <button onClick={() => setZoom(Math.max(0.5, zoom - 0.1))} className="p-2 glass-button rounded-xl"><ZoomOut size={18}/></button>
+          <button onClick={handleResetViewport} className="p-2 glass-button rounded-xl"><Maximize size={18}/></button>
+          <button onClick={() => setZoom(Math.min(3, zoom + 0.1))} className="p-2 glass-button rounded-xl"><ZoomIn size={18}/></button>
         </div>
-
-        {/* Undo-Redo & Deletions */}
-        <div className={`flex items-center gap-2 border-l pl-4 ${gfMode ? 'border-rose-200' : 'border-white/10'}`}>
-          <button 
-            onClick={handleUndo} 
-            className={`p-2 rounded-xl border ${gfMode ? 'glass-button-gf text-rose-500' : 'glass-button'}`} 
-            title="Undo Annotation"
-          >
-            <Undo2 size={16} />
-          </button>
-          <button 
-            onClick={handleRedo} 
-            className={`p-2 rounded-xl border ${gfMode ? 'glass-button-gf text-rose-500' : 'glass-button'}`} 
-            title="Redo Annotation"
-          >
-            <Redo2 size={16} />
-          </button>
-          <button 
-            onClick={deleteActiveObject} 
-            className={`p-2 rounded-xl border hover:text-red-400 ${gfMode ? 'glass-button-gf text-rose-500' : 'glass-button'}`} 
-            title="Delete Selected"
-          >
-            <Trash2 size={16} />
-          </button>
-          <button 
-            onClick={saveAsPNG} 
-            className={`p-2 rounded-xl border ${gfMode ? 'glass-button-gf text-rose-500' : 'glass-button'}`} 
-            title="Export as PNG"
-          >
-            <FileImage size={16} />
-          </button>
+        <div className="flex gap-2 border-l border-white/5 pl-4">
+          <button onClick={handleUndo} className="p-2 glass-button rounded-xl"><Undo2 size={18}/></button>
+          <button onClick={deleteActiveObject} className="p-2 glass-button rounded-xl text-red-500 border-red-500/10"><Trash2 size={18}/></button>
+          <button onClick={onExportPDF} className="p-2 bg-indigo-500 hover:bg-indigo-600 rounded-xl text-white font-black px-6 text-xs flex items-center gap-2 uppercase tracking-tighter"><Download size={16}/> Save PDF</button>
+        </div>
+      </div>
+      
+      <div className="flex-1 overflow-auto bg-black/40 rounded-[2.5rem] p-8 flex justify-center items-start custom-scroll">
+        <div className="relative shadow-2xl">
+          {loading && <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm rounded-xl text-white font-black uppercase tracking-widest">Loading Page...</div>}
+          {scanning && <div className="scanner-line" />}
+          <div ref={containerRef} className="bg-white" />
         </div>
       </div>
 
-      {/* Main Viewport Container */}
-      <div className={`relative flex justify-center items-start overflow-auto min-h-[450px] p-4 rounded-3xl transition-all duration-300 ${
-        gfMode ? 'glass-panel-gf border border-rose-200' : 'glass-panel'
-      }`}>
-        {loading && (
-          <div className="absolute inset-0 bg-slate-950/60 backdrop-blur-sm flex flex-col items-center justify-center z-10 rounded-3xl">
-            <div className="relative w-16 h-16">
-              <div className="absolute inset-0 rounded-full border-4 border-pink-500/20 animate-pulse"></div>
-              <div className="absolute inset-0 rounded-full border-4 border-t-pink-500 animate-spin"></div>
-            </div>
-            <p className="mt-4 text-sm font-semibold tracking-wide text-pink-400">Rendering page...</p>
-          </div>
-        )}
-        <div 
-          ref={containerRef} 
-          className={`inline-block canvas-glow rounded-xl bg-white overflow-hidden transition-all duration-300 ${
-            fade ? 'opacity-100 scale-100' : 'opacity-0 scale-[0.99]'
-          }`}
-        ></div>
+      <div className="flex gap-3 overflow-x-auto py-4 shrink-0 px-2 scrollbar-thin">
+        {thumbnails.map(t => (
+          <img key={t.pageNum} src={t.dataUrl} onClick={() => setCurrentPage(t.pageNum)} className={`h-16 border-2 rounded-2xl cursor-pointer transition-all ${currentPage === t.pageNum ? 'border-indigo-500 scale-105 shadow-xl' : 'border-transparent opacity-40 hover:opacity-100'}`} />
+        ))}
       </div>
-
-      {/* Preview Thumbnail strip */}
-      {thumbnails.length > 0 && (
-        <div className={`p-4 rounded-2xl mt-2 w-full transition-all duration-300 ${
-          gfMode ? 'glass-panel-gf border border-rose-200 text-slate-800' : 'glass-panel'
-        }`}>
-          <h4 className="text-[10px] uppercase font-bold text-gray-400 tracking-wider mb-2 px-1">Page Thumbnails</h4>
-          <div className="flex gap-3.5 overflow-x-auto py-2.5 px-1 scrollbar-thin">
-            {thumbnails.map(thumb => (
-              <button
-                key={thumb.pageNum}
-                onClick={() => setCurrentPage(thumb.pageNum)}
-                className={`relative shrink-0 rounded-xl overflow-hidden border-2 transition-all duration-300 ${
-                  currentPage === thumb.pageNum 
-                    ? 'border-pink-500 scale-105 shadow-lg shadow-pink-500/20' 
-                    : 'border-white/5 hover:border-white/20'
-                }`}
-              >
-                <img src={thumb.dataUrl} alt={`Pg ${thumb.pageNum}`} className="h-20 w-auto object-cover" />
-                <div className="absolute bottom-0 inset-x-0 bg-slate-950/80 text-[10px] text-gray-300 py-0.5 text-center font-semibold">
-                  Pg {thumb.pageNum}
-                </div>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 });
 
-PDFViewer.displayName = 'PDFViewer';
 export default PDFViewer;

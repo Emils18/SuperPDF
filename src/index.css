@@ -2,84 +2,50 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Custom glassmorphic scrollbars */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.01);
-  border-radius: 8px;
-}
-::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-  transition: background 0.3s;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.25);
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #0b0f1a; }
+::-webkit-scrollbar-thumb { background: #4f46e5; border-radius: 10px; border: 2px solid #0b0f1a; }
+
+body { 
+  background-color: #050711; 
+  color: #e2e8f0; 
+  margin: 0; 
+  padding: 0;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden; 
 }
 
-/* Shifting holographic ambient background */
-@keyframes bg-glow-shift {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
-}
-
-.animate-bg-mesh {
-  background-size: 200% 200%;
-  animation: bg-glow-shift 18s ease infinite;
-}
-
-/* Page switch transitions */
-.page-fade-enter {
-  opacity: 0;
-  transform: scale(0.98);
-}
-.page-fade-enter-active {
-  opacity: 1;
-  transform: scale(1);
-  transition: opacity 250ms ease-out, transform 250ms ease-out;
-}
-
-/* Glassmorphism panel configurations */
 .glass-panel {
-  background: rgba(10, 15, 30, 0.55);
+  background: rgba(15, 23, 42, 0.8);
   backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.5);
-}
-
-.glass-panel-gf {
-  background: rgba(253, 242, 248, 0.65);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(251, 113, 133, 0.2);
-  box-shadow: 0 12px 40px 0 rgba(251, 113, 133, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .glass-button {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: all 0.2s ease;
 }
 
 .glass-button:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.15);
-  transform: translateY(-1px);
+  background: rgba(99, 102, 241, 0.2);
+  border-color: #6366f1;
 }
 
-.glass-button-gf {
-  background: rgba(251, 113, 133, 0.05);
-  border: 1px solid rgba(251, 113, 133, 0.15);
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+@keyframes laser-scan {
+  0% { top: 0%; opacity: 0; }
+  50% { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
 }
 
-.glass-button-gf:hover {
-  background: rgba(251, 113, 133, 0.12);
-  border-color: rgba(251, 113, 133, 0.3);
-  transform: translateY(-1px);
+.scanner-line {
+  position: absolute;
+  left: 0; width: 100%; height: 4px;
+  background: #6366f1;
+  box-shadow: 0 0 20px #6366f1;
+  z-index: 50;
+  pointer-events: none;
+  animation: laser-scan 2s linear infinite;
 }
