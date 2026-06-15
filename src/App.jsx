@@ -17,6 +17,7 @@ function App() {
   const [color, setColor] = useState('#6366f1');
   const [strokeWidth, setStrokeWidth] = useState(4);
   const [annotationsMap, setAnnotationsMap] = useState({});
+  const [canvasImages, setCanvasImages] = useState({}); // High-res edited pages
   const [layers, setLayers] = useState([]);
   const [textColor, setTextColor] = useState('#000000');
   const [textFont, setTextFont] = useState('sans-serif');
@@ -28,12 +29,23 @@ function App() {
 
   const handleSavePDF = async () => {
     if (!pdfDoc) return;
+
+    // 1. SYNC LOCK: Capture the absolute latest pixels of the current page first
+    const finalImage = pdfViewerRef.current?.getFinalImage();
+    if (finalImage) {
+      setCanvasImages(prev => ({ ...prev, [currentPage]: finalImage }));
+    }
+
     const name = window.prompt("What file name would you like to use?", "Edited_Project");
     if (name) {
-      toast.loading("Exporting your PDF...", { id: 'save' });
-      const success = await exportPDFWithAnnotations(pdfDoc, annotationsMap, pageDimensions, name);
-      toast.dismiss('save');
-      if (success) toast.success("PDF Downloaded!");
+      toast.loading("Flattening document layers...", { id: 'save' });
+      // 2. Pass current image map to the export engine
+      // We wrap it in a tiny timeout to ensure the setCanvasImages state is ready
+      setTimeout(async () => {
+          const success = await exportPDFWithAnnotations(pdfDoc, canvasImages, name);
+          toast.dismiss('save');
+          if (success) toast.success("PDF Downloaded!");
+      }, 100);
     }
   };
 
@@ -48,15 +60,15 @@ function App() {
   };
 
   return (
-    <div className="h-screen w-full flex flex-col bg-[#050711] text-white overflow-hidden">
+    <div className="h-screen w-full flex flex-col bg-[#050711] text-white overflow-hidden font-sans">
       <Toaster position="top-right" />
       
       <header className="p-4 border-b border-white/10 flex justify-between items-center glass-panel z-50 shrink-0">
         <h1 className="text-xl font-black tracking-tighter text-indigo-400 uppercase">Super PDF Editor</h1>
         <div className="flex gap-4">
-          <button onClick={() => { setPdfFile(null); setAnnotationsMap({}); }} className="text-[10px] font-black uppercase text-gray-500 hover:text-white transition">New Project</button>
+          <button onClick={() => { setPdfFile(null); setCanvasImages({}); }} className="text-[10px] font-black uppercase text-gray-500 hover:text-white transition">New Project</button>
           <input type="file" accept="application/pdf" id="pdf-up" onChange={e => setPdfFile(e.target.files[0])} className="hidden" />
-          <label htmlFor="pdf-up" className="px-6 py-2 bg-indigo-500 text-white rounded-2xl text-xs font-black uppercase cursor-pointer hover:scale-105 active:scale-95 transition shadow-lg">Upload PDF</label>
+          <label htmlFor="pdf-up" className="px-6 py-2 bg-indigo-500 text-white rounded-2xl text-xs font-black uppercase cursor-pointer hover:scale-105 active:scale-95 transition shadow-lg shadow-indigo-500/20">Upload PDF</label>
         </div>
       </header>
 
@@ -75,31 +87,27 @@ function App() {
         )}
         <main className="flex-1 p-4 overflow-hidden h-full flex justify-center">
           {pdfFile ? (
-            <PDFViewer ref={pdfViewerRef} {...{ pdfFile, currentPage, setCurrentPage, totalPages, setTotalPages, setPdfDoc, setPageDimensions, activeTool, setActiveTool, color, strokeWidth, annotationsMap, setAnnotationsMap, setCanvasInstance, onUpdateLayers: setLayers, textColor, textFont }} onExportPDF={handleSavePDF} />
+            <PDFViewer ref={pdfViewerRef} {...{ pdfFile, currentPage, setCurrentPage, totalPages, setTotalPages, setPdfDoc, setPageDimensions, activeTool, setActiveTool, color, strokeWidth, annotationsMap, setAnnotationsMap, setCanvasInstance, onUpdateLayers: setLayers, textColor, textFont, setCanvasImages }} onExportPDF={handleSavePDF} />
           ) : (
             <div className="flex flex-col items-center justify-center opacity-20"><div className="text-[12rem] mb-4">📄</div><h2 className="text-4xl font-black uppercase tracking-tighter">Ready to Start</h2></div>
           )}
         </main>
       </div>
 
-      {/* SIGNATURE MODAL */}
       {showSignPad && (
         <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
           <div className="bg-white p-8 rounded-[2.5rem] max-w-md w-full shadow-2xl">
-            <div className="flex justify-between items-center mb-6 text-slate-800">
-                <h3 className="text-lg font-black uppercase tracking-tighter">Hand-drawn Sign</h3>
-                <button onClick={() => setShowSignPad(false)} className="text-slate-400 hover:text-slate-600"><X/></button>
-            </div>
+            <div className="flex justify-between items-center mb-6 text-slate-800"><h3 className="text-lg font-black uppercase tracking-tighter">Sign Below</h3><button onClick={() => setShowSignPad(false)} className="text-slate-400 hover:text-slate-600 transition-all"><X/></button></div>
             <canvas 
                 ref={signCanvasRef} width={400} height={200} 
                 onMouseDown={(e) => { isDrawingSign.current = true; const ctx = signCanvasRef.current.getContext('2d'); ctx.beginPath(); ctx.moveTo(e.nativeEvent.offsetX, e.nativeEvent.offsetY); }}
                 onMouseMove={(e) => { if (isDrawingSign.current) { const ctx = signCanvasRef.current.getContext('2d'); ctx.lineWidth = 3; ctx.lineCap='round'; ctx.strokeStyle='#000'; ctx.lineTo(e.nativeEvent.offsetX, e.nativeEvent.offsetY); ctx.stroke(); }}}
                 onMouseUp={() => isDrawingSign.current = false}
-                className="border-2 border-dashed border-slate-200 rounded-3xl bg-slate-50 w-full mb-6 cursor-crosshair"
+                className="border-2 border-dashed border-slate-200 rounded-3xl bg-slate-50 w-full mb-6 cursor-crosshair shadow-inner"
             />
             <div className="flex gap-3">
-              <button onClick={() => signCanvasRef.current.getContext('2d').clearRect(0,0,400,200)} className="flex-1 py-3 text-slate-500 font-bold uppercase text-xs tracking-widest border border-slate-100 rounded-2xl hover:bg-slate-50 transition">Clear</button>
-              <button onClick={handleSaveSignature} className="flex-1 py-3 bg-indigo-600 text-white font-black uppercase text-xs tracking-widest rounded-2xl shadow-lg hover:bg-indigo-700 transition">Stamp Sign</button>
+              <button onClick={() => signCanvasRef.current.getContext('2d').clearRect(0,0,400,200)} className="flex-1 py-3 text-slate-500 font-bold uppercase text-xs tracking-widest border border-slate-100 rounded-2xl hover:bg-slate-50 transition active:scale-95">Clear Pad</button>
+              <button onClick={handleSaveSignature} className="flex-1 py-3 bg-indigo-600 text-white font-black uppercase text-xs tracking-widest rounded-2xl shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition active:scale-95">Stamp Sign</button>
             </div>
           </div>
         </div>

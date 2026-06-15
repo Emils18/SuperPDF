@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, useImperativeHandle, forwardRef } from 're
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.js?url';
 import { fabric } from 'fabric';
-import { Undo2, ZoomIn, ZoomOut, Maximize, Trash2, ChevronLeft, ChevronRight, FileImage, Download } from 'lucide-react';
+import { Undo2, Redo2, ZoomIn, ZoomOut, Maximize, Trash2, ChevronLeft, ChevronRight, Download } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
@@ -11,7 +11,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 const PDFViewer = forwardRef(({
   pdfFile, currentPage, setCurrentPage, totalPages, setTotalPages, setPdfDoc, setPageDimensions, 
   activeTool, setActiveTool, color, strokeWidth, annotationsMap, setAnnotationsMap, 
-  setCanvasInstance, onUpdateLayers, textColor, textFont, onExportPDF
+  setCanvasInstance, onUpdateLayers, textColor, textFont, onExportPDF, setCanvasImages
 }, ref) => {
   const containerRef = useRef(null);
   const fabricInstance = useRef(null);
@@ -20,6 +20,7 @@ const PDFViewer = forwardRef(({
   const [scanning, setScanning] = useState(false);
   const [zoom, setZoom] = useState(1.0);
   const [thumbnails, setThumbnails] = useState([]);
+  
   const historyStacks = useRef({});
   const historyPointers = useRef({});
   const isSpacePressed = useRef(false);
@@ -28,24 +29,37 @@ const PDFViewer = forwardRef(({
   const toolParams = useRef({ activeTool, color, strokeWidth, textColor, textFont });
   useEffect(() => { toolParams.current = { activeTool, color, strokeWidth, textColor, textFont }; }, [activeTool, color, strokeWidth, textColor, textFont]);
 
-  // FUNCTIONS
+  // --- 1. ENGINE UTILITIES ---
+
   const updateLayersState = () => {
     const canvas = fabricInstance.current;
     if (!canvas) return;
-    const items = canvas.getObjects().map((obj, index) => ({
-      id: `l-${index}`, title: obj.type.toUpperCase(), ref: obj
-    }));
-    onUpdateLayers(items);
+    onUpdateLayers(canvas.getObjects().map((obj, i) => ({ 
+      id: `l-${i}`, 
+      title: obj.type === 'textbox' ? `Text: ${obj.text.substring(0,10)}...` : obj.type.toUpperCase(), 
+      ref: obj 
+    })));
+  };
+
+  const getSyncSnapshot = () => {
+    if (!fabricInstance.current) return null;
+    return fabricInstance.current.toDataURL({ format: 'png', multiplier: 2 });
   };
 
   const saveHistorySnapshot = () => {
     const canvas = fabricInstance.current;
     if (!canvas) return;
+    
     const objects = canvas.getObjects().map(obj => obj.toObject());
+    setAnnotationsMap(prev => ({ ...prev, [currentPage]: objects }));
+
+    // Update the high-res PNG map used for flattening
+    const dataUrl = getSyncSnapshot();
+    setCanvasImages(prev => ({ ...prev, [currentPage]: dataUrl }));
+
     if (!historyStacks.current[currentPage]) { historyStacks.current[currentPage] = []; historyPointers.current[currentPage] = -1; }
     historyStacks.current[currentPage].push(objects);
     historyPointers.current[currentPage]++;
-    setAnnotationsMap(prev => ({ ...prev, [currentPage]: objects }));
     updateLayersState();
   };
 
@@ -66,7 +80,11 @@ const PDFViewer = forwardRef(({
       const state = s[historyPointers.current[currentPage]];
       const canvas = fabricInstance.current;
       canvas.remove(...canvas.getObjects());
-      fabric.util.enlivenObjects(state, (objs) => { objs.forEach(o => canvas.add(o)); canvas.renderAll(); updateLayersState(); });
+      fabric.util.enlivenObjects(state, (objs) => {
+        objs.forEach(o => canvas.add(o));
+        canvas.renderAll();
+        updateLayersState();
+      });
     }
   };
 
@@ -75,15 +93,21 @@ const PDFViewer = forwardRef(({
     if (fabricInstance.current) {
       fabricInstance.current.setViewportTransform([1, 0, 0, 1, 0, 0]);
       fabricInstance.current.renderAll();
-      toast.success("Centered");
+      toast.success("Viewport Reset");
     }
   };
 
   const setupToolListeners = (canvas) => {
     canvas.off('mouse:down'); canvas.off('mouse:move'); canvas.off('mouse:up');
+    canvas.off('object:modified'); canvas.off('text:changed');
+
     canvas.isDrawingMode = (activeTool === 'draw' || activeTool === 'highlight' || activeTool === 'eraser');
     canvas.selection = (activeTool === 'select');
     canvas.defaultCursor = activeTool === 'pan' ? 'grab' : 'default';
+
+    // Auto-capture on every change to prevent Save delays
+    canvas.on('object:modified', saveHistorySnapshot);
+    canvas.on('text:changed', saveHistorySnapshot);
 
     if (canvas.isDrawingMode && canvas.freeDrawingBrush) {
       if (activeTool === 'eraser') canvas.freeDrawingBrush.color = '#ffffff';
@@ -108,10 +132,9 @@ const PDFViewer = forwardRef(({
       canvas.on('mouse:down', (o) => {
         if (canvas.getActiveObject()) return;
         const ptr = canvas.getPointer(o.e);
-        const txt = new fabric.Textbox('Edit Me', { left: ptr.x, top: ptr.y, fontSize: 22, fill: textColor, fontFamily: textFont, width: 150 });
+        const txt = new fabric.Textbox('Double Click to Edit', { left: ptr.x, top: ptr.y, fontSize: 22, fill: textColor, fontFamily: textFont, width: 180 });
         canvas.add(txt).setActiveObject(txt);
-        saveHistorySnapshot();
-        setActiveTool('select');
+        saveHistorySnapshot(); setActiveTool('select');
       });
     }
 
@@ -140,6 +163,8 @@ const PDFViewer = forwardRef(({
       });
     }
   };
+
+  // --- 2. LIFECYCLE ---
 
   useEffect(() => {
     if (!pdfFile) return;
@@ -190,7 +215,7 @@ const PDFViewer = forwardRef(({
         const activeObj = fabricInstance.current.getActiveObject();
         if (activeObj) {
             if (activeObj.type === 'textbox') activeObj.set({ fill: textColor, fontFamily: textFont });
-            else activeObj.set({ stroke: color });
+            else activeObj.set({ stroke: color, strokeWidth: strokeWidth });
             fabricInstance.current.renderAll();
         }
         setupToolListeners(fabricInstance.current);
@@ -205,6 +230,7 @@ const PDFViewer = forwardRef(({
   }, [activeTool]);
 
   useImperativeHandle(ref, () => ({
+    getFinalImage: () => getSyncSnapshot(), // Instant sync capture for the Save logic
     insertImage: (file) => {
       const reader = new FileReader();
       reader.onload = (f) => fabric.Image.fromURL(f.target.result, (img) => {
@@ -214,7 +240,8 @@ const PDFViewer = forwardRef(({
     },
     insertSignature: (dataUrl) => {
       fabric.Image.fromURL(dataUrl, (img) => {
-        img.scaleToWidth(150); fabricInstance.current.add(img).setActiveObject(img).renderAll(); saveHistorySnapshot();
+        img.scaleToWidth(150); fabricInstance.current.add(img); fabricInstance.current.setActiveObject(img);
+        fabricInstance.current.renderAll(); saveHistorySnapshot();
       });
     },
     rotateSelectedImage: () => {
@@ -251,20 +278,20 @@ const PDFViewer = forwardRef(({
           <button onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))} className="p-2 glass-button rounded-xl"><ChevronRight size={20}/></button>
         </div>
         <div className="flex items-center gap-2 border-l border-white/5 pl-4">
-          <button onClick={() => setZoom(Math.max(0.5, zoom - 0.1))} className="p-2 glass-button rounded-xl"><ZoomOut size={18}/></button>
-          <button onClick={handleResetViewport} className="p-2 glass-button rounded-xl"><Maximize size={18}/></button>
-          <button onClick={() => setZoom(Math.min(3, zoom + 0.1))} className="p-2 glass-button rounded-xl"><ZoomIn size={18}/></button>
+          <button onClick={() => setZoom(zoom - 0.1)} className="p-2 glass-button rounded-xl"><ZoomOut size={18}/></button>
+          <button onClick={handleResetViewport} className="p-2 glass-button rounded-xl" title="Reset Viewport"><Maximize size={18}/></button>
+          <button onClick={() => setZoom(zoom + 0.1)} className="p-2 glass-button rounded-xl"><ZoomIn size={18}/></button>
         </div>
-        <div className="flex gap-2 border-l border-white/5 pl-4">
+        <div className="flex gap-2 border-l border-white/5 pl-4 font-mono">
           <button onClick={handleUndo} className="p-2 glass-button rounded-xl"><Undo2 size={18}/></button>
           <button onClick={deleteActiveObject} className="p-2 glass-button rounded-xl text-red-500 border-red-500/10"><Trash2 size={18}/></button>
-          <button onClick={onExportPDF} className="p-2 bg-indigo-500 hover:bg-indigo-600 rounded-xl text-white font-black px-6 text-xs flex items-center gap-2 uppercase tracking-tighter"><Download size={16}/> Save PDF</button>
+          <button onClick={onExportPDF} className="p-2 bg-indigo-500 hover:bg-indigo-600 rounded-xl text-white font-black px-6 text-xs flex items-center gap-2 uppercase tracking-tighter shadow-lg"><Download size={16}/> Save PDF</button>
         </div>
       </div>
       
       <div className="flex-1 overflow-auto bg-black/40 rounded-[2.5rem] p-8 flex justify-center items-start custom-scroll">
         <div className="relative shadow-2xl">
-          {loading && <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm rounded-xl text-white font-black uppercase tracking-widest">Loading Page...</div>}
+          {loading && <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm rounded-xl text-white font-black uppercase tracking-widest">Compiling...</div>}
           {scanning && <div className="scanner-line" />}
           <div ref={containerRef} className="bg-white" />
         </div>
@@ -272,7 +299,7 @@ const PDFViewer = forwardRef(({
 
       <div className="flex gap-3 overflow-x-auto py-4 shrink-0 px-2 scrollbar-thin">
         {thumbnails.map(t => (
-          <img key={t.pageNum} src={t.dataUrl} onClick={() => setCurrentPage(t.pageNum)} className={`h-16 border-2 rounded-2xl cursor-pointer transition-all ${currentPage === t.pageNum ? 'border-indigo-500 scale-105 shadow-xl' : 'border-transparent opacity-40 hover:opacity-100'}`} />
+          <img key={t.pageNum} src={t.dataUrl} onClick={() => setCurrentPage(t.pageNum)} className={`h-16 border-2 rounded-2xl cursor-pointer transition-all ${currentPage === t.pageNum ? 'border-indigo-500 scale-105 shadow-xl' : 'border-transparent opacity-50'}`} />
         ))}
       </div>
     </div>
