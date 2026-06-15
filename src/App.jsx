@@ -17,7 +17,7 @@ function App() {
   const [color, setColor] = useState('#6366f1');
   const [strokeWidth, setStrokeWidth] = useState(4);
   const [annotationsMap, setAnnotationsMap] = useState({});
-  const [canvasImages, setCanvasImages] = useState({}); // High-res edited pages
+  const [canvasImages, setCanvasImages] = useState({}); 
   const [layers, setLayers] = useState([]);
   const [textColor, setTextColor] = useState('#000000');
   const [textFont, setTextFont] = useState('sans-serif');
@@ -29,23 +29,15 @@ function App() {
 
   const handleSavePDF = async () => {
     if (!pdfDoc) return;
-
-    // 1. SYNC LOCK: Capture the absolute latest pixels of the current page first
-    const finalImage = pdfViewerRef.current?.getFinalImage();
-    if (finalImage) {
-      setCanvasImages(prev => ({ ...prev, [currentPage]: finalImage }));
-    }
-
-    const name = window.prompt("What file name would you like to use?", "Edited_Project");
+    const name = window.prompt("Name your edited PDF:", "Document_Final");
     if (name) {
-      toast.loading("Flattening document layers...", { id: 'save' });
-      // 2. Pass current image map to the export engine
-      // We wrap it in a tiny timeout to ensure the setCanvasImages state is ready
+      toast.loading("Destroying old text data...", { id: 'save' });
+      // Minor delay to ensure sync capture is solid
       setTimeout(async () => {
           const success = await exportPDFWithAnnotations(pdfDoc, canvasImages, name);
           toast.dismiss('save');
-          if (success) toast.success("PDF Downloaded!");
-      }, 100);
+          if (success) toast.success("Permanent PDF Saved!");
+      }, 200);
     }
   };
 
@@ -55,20 +47,18 @@ function App() {
       const dataUrl = canvas.toDataURL();
       pdfViewerRef.current?.insertSignature(dataUrl);
       setShowSignPad(false);
-      toast.success("Signature stamped!");
     }
   };
 
   return (
-    <div className="h-screen w-full flex flex-col bg-[#050711] text-white overflow-hidden font-sans">
+    <div className="h-screen w-screen flex flex-col bg-[#050711] text-white overflow-hidden font-sans">
       <Toaster position="top-right" />
-      
       <header className="p-4 border-b border-white/10 flex justify-between items-center glass-panel z-50 shrink-0">
         <h1 className="text-xl font-black tracking-tighter text-indigo-400 uppercase">Super PDF Editor</h1>
         <div className="flex gap-4">
           <button onClick={() => { setPdfFile(null); setCanvasImages({}); }} className="text-[10px] font-black uppercase text-gray-500 hover:text-white transition">New Project</button>
           <input type="file" accept="application/pdf" id="pdf-up" onChange={e => setPdfFile(e.target.files[0])} className="hidden" />
-          <label htmlFor="pdf-up" className="px-6 py-2 bg-indigo-500 text-white rounded-2xl text-xs font-black uppercase cursor-pointer hover:scale-105 active:scale-95 transition shadow-lg shadow-indigo-500/20">Upload PDF</label>
+          <label htmlFor="pdf-up" className="px-6 py-2 bg-indigo-500 text-white rounded-2xl text-xs font-black uppercase cursor-pointer hover:scale-105 active:scale-95 transition shadow-lg">Upload PDF</label>
         </div>
       </header>
 
@@ -89,7 +79,7 @@ function App() {
           {pdfFile ? (
             <PDFViewer ref={pdfViewerRef} {...{ pdfFile, currentPage, setCurrentPage, totalPages, setTotalPages, setPdfDoc, setPageDimensions, activeTool, setActiveTool, color, strokeWidth, annotationsMap, setAnnotationsMap, setCanvasInstance, onUpdateLayers: setLayers, textColor, textFont, setCanvasImages }} onExportPDF={handleSavePDF} />
           ) : (
-            <div className="flex flex-col items-center justify-center opacity-20"><div className="text-[12rem] mb-4">📄</div><h2 className="text-4xl font-black uppercase tracking-tighter">Ready to Start</h2></div>
+            <div className="flex flex-col items-center justify-center opacity-20 text-center"><div className="text-[12rem] mb-4">📄</div><h2 className="text-4xl font-black uppercase tracking-tighter">Ready to Work</h2></div>
           )}
         </main>
       </div>

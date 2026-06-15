@@ -4,6 +4,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.js?url';
 import { fabric } from 'fabric';
 import { Undo2, Redo2, ZoomIn, ZoomOut, Maximize, Trash2, ChevronLeft, ChevronRight, Download } from 'lucide-react';
+import Tesseract from 'tesseract.js'; // REAL OCR ENGINE
 import toast from 'react-hot-toast';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
@@ -18,6 +19,7 @@ const PDFViewer = forwardRef(({
   const [pdfDocument, setPdfDocument] = useState(null);
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [ocrProgress, setOcrProgress] = useState(0);
   const [zoom, setZoom] = useState(1.0);
   const [thumbnails, setThumbnails] = useState([]);
   
@@ -29,34 +31,23 @@ const PDFViewer = forwardRef(({
   const toolParams = useRef({ activeTool, color, strokeWidth, textColor, textFont });
   useEffect(() => { toolParams.current = { activeTool, color, strokeWidth, textColor, textFont }; }, [activeTool, color, strokeWidth, textColor, textFont]);
 
-  // --- 1. ENGINE UTILITIES ---
-
+  // --- CORE HELPERS ---
   const updateLayersState = () => {
     const canvas = fabricInstance.current;
     if (!canvas) return;
-    onUpdateLayers(canvas.getObjects().map((obj, i) => ({ 
-      id: `l-${i}`, 
-      title: obj.type === 'textbox' ? `Text: ${obj.text.substring(0,10)}...` : obj.type.toUpperCase(), 
-      ref: obj 
-    })));
-  };
-
-  const getSyncSnapshot = () => {
-    if (!fabricInstance.current) return null;
-    return fabricInstance.current.toDataURL({ format: 'png', multiplier: 2 });
+    const items = canvas.getObjects().map((obj, index) => ({
+      id: `l-${index}-${Date.now()}`, title: obj.type.toUpperCase(), ref: obj
+    }));
+    onUpdateLayers(items);
   };
 
   const saveHistorySnapshot = () => {
     const canvas = fabricInstance.current;
     if (!canvas) return;
-    
     const objects = canvas.getObjects().map(obj => obj.toObject());
     setAnnotationsMap(prev => ({ ...prev, [currentPage]: objects }));
-
-    // Update the high-res PNG map used for flattening
-    const dataUrl = getSyncSnapshot();
+    const dataUrl = canvas.toDataURL({ format: 'png', multiplier: 2.0 });
     setCanvasImages(prev => ({ ...prev, [currentPage]: dataUrl }));
-
     if (!historyStacks.current[currentPage]) { historyStacks.current[currentPage] = []; historyPointers.current[currentPage] = -1; }
     historyStacks.current[currentPage].push(objects);
     historyPointers.current[currentPage]++;
@@ -80,11 +71,7 @@ const PDFViewer = forwardRef(({
       const state = s[historyPointers.current[currentPage]];
       const canvas = fabricInstance.current;
       canvas.remove(...canvas.getObjects());
-      fabric.util.enlivenObjects(state, (objs) => {
-        objs.forEach(o => canvas.add(o));
-        canvas.renderAll();
-        updateLayersState();
-      });
+      fabric.util.enlivenObjects(state, (objs) => { objs.forEach(o => canvas.add(o)); canvas.renderAll(); updateLayersState(); });
     }
   };
 
@@ -93,19 +80,19 @@ const PDFViewer = forwardRef(({
     if (fabricInstance.current) {
       fabricInstance.current.setViewportTransform([1, 0, 0, 1, 0, 0]);
       fabricInstance.current.renderAll();
-      toast.success("Viewport Reset");
+      toast.success("View Centered");
     }
   };
 
   const setupToolListeners = (canvas) => {
+    if (!canvas) return;
     canvas.off('mouse:down'); canvas.off('mouse:move'); canvas.off('mouse:up');
     canvas.off('object:modified'); canvas.off('text:changed');
-
+    
     canvas.isDrawingMode = (activeTool === 'draw' || activeTool === 'highlight' || activeTool === 'eraser');
     canvas.selection = (activeTool === 'select');
     canvas.defaultCursor = activeTool === 'pan' ? 'grab' : 'default';
 
-    // Auto-capture on every change to prevent Save delays
     canvas.on('object:modified', saveHistorySnapshot);
     canvas.on('text:changed', saveHistorySnapshot);
 
@@ -132,7 +119,7 @@ const PDFViewer = forwardRef(({
       canvas.on('mouse:down', (o) => {
         if (canvas.getActiveObject()) return;
         const ptr = canvas.getPointer(o.e);
-        const txt = new fabric.Textbox('Double Click to Edit', { left: ptr.x, top: ptr.y, fontSize: 22, fill: textColor, fontFamily: textFont, width: 180 });
+        const txt = new fabric.Textbox('New Text', { left: ptr.x, top: ptr.y, fontSize: 22, fill: textColor, fontFamily: textFont, width: 150 });
         canvas.add(txt).setActiveObject(txt);
         saveHistorySnapshot(); setActiveTool('select');
       });
@@ -152,34 +139,16 @@ const PDFViewer = forwardRef(({
       });
       canvas.on('mouse:up', () => { isDown = false; saveHistorySnapshot(); });
     }
-
-    if (activeTool === 'eraser') {
-      canvas.on('mouse:down', (options) => {
-        if (options.target) {
-          canvas.remove(options.target);
-          canvas.discardActiveObject().renderAll();
-          saveHistorySnapshot();
-        }
-      });
-    }
   };
 
-  // --- 2. LIFECYCLE ---
-
+  // --- RENDERING LIFECYCLE ---
   useEffect(() => {
     if (!pdfFile) return;
     (async () => {
       setLoading(true);
       const doc = await pdfjsLib.getDocument({ data: await pdfFile.arrayBuffer() }).promise;
       setPdfDocument(doc); setPdfDoc(doc); setTotalPages(doc.numPages);
-      const list = [];
-      for (let i = 1; i <= Math.min(doc.numPages, 10); i++) {
-        const p = await doc.getPage(i); const vp = p.getViewport({ scale: 0.1 });
-        const c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height;
-        await p.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
-        list.push({ pageNum: i, dataUrl: c.toDataURL() });
-      }
-      setThumbnails(list); setLoading(false);
+      setLoading(false);
     })();
   }, [pdfFile]);
 
@@ -211,17 +180,10 @@ const PDFViewer = forwardRef(({
   }, [pdfDocument, currentPage, zoom]);
 
   useEffect(() => {
-    if (fabricInstance.current) {
-        const activeObj = fabricInstance.current.getActiveObject();
-        if (activeObj) {
-            if (activeObj.type === 'textbox') activeObj.set({ fill: textColor, fontFamily: textFont });
-            else activeObj.set({ stroke: color, strokeWidth: strokeWidth });
-            fabricInstance.current.renderAll();
-        }
-        setupToolListeners(fabricInstance.current);
-    }
+    if (fabricInstance.current) setupToolListeners(fabricInstance.current);
   }, [activeTool, color, strokeWidth, textColor, textFont]);
 
+  // Spacebar Pan Hook
   useEffect(() => {
     const down = (e) => { if (e.key === ' ' && !isSpacePressed.current) { e.preventDefault(); isSpacePressed.current = true; prevToolBeforeSpace.current = activeTool; setActiveTool('pan'); }};
     const up = (e) => { if (e.key === ' ' && isSpacePressed.current) { isSpacePressed.current = false; setActiveTool(prevToolBeforeSpace.current); }};
@@ -230,7 +192,7 @@ const PDFViewer = forwardRef(({
   }, [activeTool]);
 
   useImperativeHandle(ref, () => ({
-    getFinalImage: () => getSyncSnapshot(), // Instant sync capture for the Save logic
+    getFinalImage: () => fabricInstance.current?.toDataURL({ format: 'png', multiplier: 2.0 }),
     insertImage: (file) => {
       const reader = new FileReader();
       reader.onload = (f) => fabric.Image.fromURL(f.target.result, (img) => {
@@ -239,33 +201,66 @@ const PDFViewer = forwardRef(({
       reader.readAsDataURL(file);
     },
     insertSignature: (dataUrl) => {
-      fabric.Image.fromURL(dataUrl, (img) => {
-        img.scaleToWidth(150); fabricInstance.current.add(img); fabricInstance.current.setActiveObject(img);
-        fabricInstance.current.renderAll(); saveHistorySnapshot();
-      });
+        fabric.Image.fromURL(dataUrl, (img) => {
+          img.scaleToWidth(150); fabricInstance.current.add(img); fabricInstance.current.setActiveObject(img);
+          fabricInstance.current.renderAll(); saveHistorySnapshot();
+        });
     },
     rotateSelectedImage: () => {
       const obj = fabricInstance.current?.getActiveObject();
       if (obj) { obj.set('angle', (obj.angle + 90) % 360); obj.setCoords(); fabricInstance.current.renderAll(); saveHistorySnapshot(); }
     },
     convertTextToLayers: async () => {
-      if (!pdfDocument) return;
+      if (!pdfDocument || !fabricInstance.current) return;
       setScanning(true);
+      setOcrProgress(0);
+
       try {
         const page = await pdfDocument.getPage(currentPage);
-        const text = await page.getTextContent();
+        const textContent = await page.getTextContent();
         const vp = page.getViewport({ scale: 1.5 * zoom });
-        await new Promise(r => setTimeout(r, 1500));
-        text.items.forEach(item => {
-          if (!item.str.trim()) return;
-          const [x, y] = vp.convertToViewportPoint(item.transform[4], item.transform[5]);
-          const fs = Math.sqrt(item.transform[0]**2 + item.transform[1]**2) * 1.5 * zoom;
-          const mask = new fabric.Rect({ left: x, top: y - fs, width: item.width * 1.5 * zoom, height: fs * 1.2, fill: 'white', selectable: false, evented: false });
-          const box = new fabric.Textbox(item.str, { left: x, top: y - fs, fontSize: fs, fill: 'black', fontFamily: 'sans-serif', width: item.width * 1.5 * zoom + 20 });
-          fabricInstance.current.add(mask, box);
-        });
-        fabricInstance.current.renderAll(); saveHistorySnapshot();
-      } finally { setScanning(false); }
+
+        // CASE 1: Digital PDF (Standard extraction)
+        if (textContent.items.length > 0) {
+          textContent.items.forEach(item => {
+            if (!item.str.trim()) return;
+            const [x, y] = vp.convertToViewportPoint(item.transform[4], item.transform[5]);
+            const fs = Math.sqrt(item.transform[0]**2 + item.transform[1]**2) * 1.5 * zoom;
+            const mask = new fabric.Rect({ left: x, top: y - fs, width: item.width * 1.5 * zoom, height: fs * 1.2, fill: 'white', selectable: false, evented: false });
+            const box = new fabric.Textbox(item.str, { left: x, top: y - fs, fontSize: fs, fill: 'black', width: item.width * 1.5 * zoom + 20 });
+            fabricInstance.current.add(mask, box);
+          });
+          fabricInstance.current.renderAll(); saveHistorySnapshot();
+          toast.success("Digital text converted!");
+        } 
+        // CASE 2: Physical Scanned PDF (Tesseract AI OCR Fallback)
+        else {
+          toast("Physical scan detected. Launching AI OCR...", { icon: '🤖' });
+          const imageToScan = fabricInstance.current.toDataURL({ format: 'png', multiplier: 2 });
+          
+          const result = await Tesseract.recognize(imageToScan, 'eng', {
+            logger: m => { if (m.status === 'recognizing text') setOcrProgress(Math.round(m.progress * 100)); }
+          });
+
+          result.data.lines.forEach(line => {
+            const bbox = line.bbox;
+            // Adjust coordinates from high-res OCR scan back to canvas scale
+            const x = bbox.x0 / 2;
+            const y = bbox.y0 / 2;
+            const w = (bbox.x1 - bbox.x0) / 2;
+            const h = (bbox.y1 - bbox.y0) / 2;
+
+            const mask = new fabric.Rect({ left: x, top: y, width: w, height: h, fill: 'white', selectable: false, evented: false });
+            const box = new fabric.Textbox(line.text, { left: x, top: y, fontSize: h * 0.8, fill: 'black', width: w + 10 });
+            fabricInstance.current.add(mask, box);
+          });
+
+          fabricInstance.current.renderAll(); saveHistorySnapshot();
+          toast.success("AI OCR: Scanned text is now editable!");
+        }
+      } catch (err) {
+        toast.error("OCR Scan Failed");
+      } finally { setScanning(false); setOcrProgress(0); }
     }
   }));
 
@@ -278,29 +273,25 @@ const PDFViewer = forwardRef(({
           <button onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))} className="p-2 glass-button rounded-xl"><ChevronRight size={20}/></button>
         </div>
         <div className="flex items-center gap-2 border-l border-white/5 pl-4">
-          <button onClick={() => setZoom(zoom - 0.1)} className="p-2 glass-button rounded-xl"><ZoomOut size={18}/></button>
+          <button onClick={() => setZoom(Math.max(0.5, zoom - 0.1))} className="p-2 glass-button rounded-xl"><ZoomOut size={18}/></button>
           <button onClick={handleResetViewport} className="p-2 glass-button rounded-xl" title="Reset Viewport"><Maximize size={18}/></button>
-          <button onClick={() => setZoom(zoom + 0.1)} className="p-2 glass-button rounded-xl"><ZoomIn size={18}/></button>
+          <button onClick={() => setZoom(Math.min(3, zoom + 0.1))} className="p-2 glass-button rounded-xl"><ZoomIn size={18}/></button>
         </div>
-        <div className="flex gap-2 border-l border-white/5 pl-4 font-mono">
-          <button onClick={handleUndo} className="p-2 glass-button rounded-xl"><Undo2 size={18}/></button>
+        <div className="flex gap-2 border-l border-white/5 pl-4">
+          <button onClick={handleUndo} className="p-2 glass-button rounded-xl" title="Undo"><Undo2 size={18}/></button>
           <button onClick={deleteActiveObject} className="p-2 glass-button rounded-xl text-red-500 border-red-500/10"><Trash2 size={18}/></button>
           <button onClick={onExportPDF} className="p-2 bg-indigo-500 hover:bg-indigo-600 rounded-xl text-white font-black px-6 text-xs flex items-center gap-2 uppercase tracking-tighter shadow-lg"><Download size={16}/> Save PDF</button>
         </div>
       </div>
-      
-      <div className="flex-1 overflow-auto bg-black/40 rounded-[2.5rem] p-8 flex justify-center items-start custom-scroll">
-        <div className="relative shadow-2xl">
-          {loading && <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm rounded-xl text-white font-black uppercase tracking-widest">Compiling...</div>}
-          {scanning && <div className="scanner-line" />}
-          <div ref={containerRef} className="bg-white" />
-        </div>
-      </div>
-
-      <div className="flex gap-3 overflow-x-auto py-4 shrink-0 px-2 scrollbar-thin">
-        {thumbnails.map(t => (
-          <img key={t.pageNum} src={t.dataUrl} onClick={() => setCurrentPage(t.pageNum)} className={`h-16 border-2 rounded-2xl cursor-pointer transition-all ${currentPage === t.pageNum ? 'border-indigo-500 scale-105 shadow-xl' : 'border-transparent opacity-50'}`} />
-        ))}
+      <div className="flex-1 overflow-auto bg-black/40 rounded-[2.5rem] p-8 flex justify-center items-start custom-scroll relative">
+        {(loading || scanning) && (
+          <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/60 backdrop-blur-md rounded-xl text-white">
+            <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4" />
+            <p className="text-xs font-black uppercase tracking-widest">{scanning ? `AI Scanning: ${ocrProgress}%` : 'Loading Page...'}</p>
+          </div>
+        )}
+        {scanning && <div className="scanner-line" />}
+        <div ref={containerRef} className="bg-white shadow-2xl" />
       </div>
     </div>
   );
